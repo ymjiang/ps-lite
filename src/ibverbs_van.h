@@ -585,7 +585,7 @@ class IBVerbsVan : public Van {
       }
 
       Endpoint *endpoint;
-      endpoints_[node.id] = std::unique_ptr<Endpoint>(new Endpoint());
+      endpoints_[node.id] = std::make_unique<Endpoint>();
       endpoint = endpoints_[node.id].get();
 
       endpoint->SetNodeID(node.id);
@@ -728,8 +728,8 @@ class IBVerbsVan : public Van {
     std::tuple<Endpoint *, BufferContext *> notification;
     recv_buffers_.WaitAndPop(&notification);
 
-    Endpoint *endpoint = std::get<0>(notification);
-    BufferContext *buffer_ctx = std::get<1>(notification);
+    Endpoint *endpoint = std::get<Endpoint *>(notification);
+    BufferContext *buffer_ctx = std::get<BufferContext *>(notification);
 
     int total_len = 0;
 
@@ -1045,7 +1045,7 @@ class IBVerbsVan : public Van {
     const RequestContext *remote_ctx = reinterpret_cast<const RequestContext *>(
         event->param.conn.private_data);
 
-    const auto r = incoming_.emplace(std::unique_ptr<Endpoint>(new Endpoint()));
+    const auto r = incoming_.emplace(std::make_unique<Endpoint>());
     Endpoint *endpoint = r.first->get();
     endpoint->SetNodeID(remote_ctx->node);
     endpoint->cm_id = id;
