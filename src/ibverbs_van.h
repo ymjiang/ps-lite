@@ -86,7 +86,7 @@ static inline T align_ceil(T v, T align) {
 class SimpleMempool {
  public:
   // Allocated an initial ``size'' of registered memory regions
-  explicit SimpleMempool(struct ibv_pd *pd, size_t size = 0x1000000) {
+  explicit SimpleMempool(struct ibv_pd *pd, size_t size = 0x100000000) {
     pd_ = pd;
     struct ibv_mr *mr;
     char *p = reinterpret_cast<char *>(aligned_alloc(kAlignment, size));
