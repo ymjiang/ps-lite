@@ -37,10 +37,13 @@ struct Endpoint {
   WRContext rx_ctx[kRxDepth];
 
   WRContext start_ctx[kStartDepth];
-  WRContext reply_ctx[kReplyDepth];
+  WRContext reply_ctx[kReplyDepth];	
+  WRContext write_ctx[kWriteDepth];
 
   ThreadsafeQueue<WRContext *> free_start_ctx;
   ThreadsafeQueue<WRContext *> free_reply_ctx;
+  ThreadsafeQueue<WRContext *> free_write_ctx;
+
 
   Endpoint() : status(IDLE), node_id(Node::kEmpty), cm_id(nullptr), rx_ctx() {}
 
@@ -64,6 +67,13 @@ struct Endpoint {
       if (reply_ctx[i].buffer) {
         free(reply_ctx[i].buffer->addr);
         CHECK_EQ(ibv_dereg_mr(reply_ctx[i].buffer), 0);
+      }
+    }
+
+    for (int i = 0; i < kWriteDepth; ++i) {
+      if (write_ctx[i].buffer) {
+        free(write_ctx[i].buffer->addr);
+        CHECK_EQ(ibv_dereg_mr(write_ctx[i].buffer), 0);
       }
     }
 
@@ -119,7 +129,9 @@ struct Endpoint {
     InitSendContextHelper(pd, start_ctx, &free_start_ctx, kStartDepth,
                           kRendezvousStartContext);
     InitSendContextHelper(pd, reply_ctx, &free_reply_ctx, kReplyDepth,
-                          kRendezvousReplyContext);
+                          kRendezvousReplyContext);    
+    InitSendContextHelper(pd, write_ctx, &free_write_ctx, kWriteDepth,	
+                          kWriteContext);
 
     for (size_t i = 0; i < kRxDepth; ++i) {
       void *buf;
@@ -193,6 +205,13 @@ class RDMATransport : public Transport {
   ~RDMATransport() {};
 
   virtual void RDMAWriteWithImm(MessageBuffer *msg_buf, uint64_t remote_addr, uint32_t rkey, uint32_t idx) {
+    WRContext *write_ctx = nullptr;
+    endpoint_->free_write_ctx.WaitAndPop(&write_ctx);
+
+    MessageBuffer **tmp = 
+        reinterpret_cast<MessageBuffer **>(write_ctx->buffer->addr);
+    *tmp = msg_buf;  // write the addr of msg_buf into the mr buffer
+
     struct ibv_sge sge;
     sge.addr = reinterpret_cast<uint64_t>(msg_buf->inline_buf);
     sge.length = msg_buf->inline_len;
@@ -200,7 +219,7 @@ class RDMATransport : public Transport {
     
     struct ibv_send_wr wr, *bad_wr = nullptr;
     memset(&wr, 0, sizeof(wr));
-    wr.wr_id = reinterpret_cast<uint64_t>(msg_buf);
+    wr.wr_id = reinterpret_cast<uint64_t>(write_ctx);
     wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
     wr.next = nullptr;
     wr.imm_data = idx;

@@ -604,6 +604,9 @@ class RDMAVan : public Van {
       case kRendezvousReplyContext:
         endpoint->free_reply_ctx.Push(context);
         break;
+      case kWriteContext:	
+        endpoint->free_write_ctx.Push(context);	
+        break;
       case kReceiveContext:
         endpoint->PostRecv(context);
         break;
@@ -636,7 +639,7 @@ class RDMAVan : public Van {
             ReleaseWorkRequestContext(context, endpoint);
           } break;
           case IBV_WC_RDMA_WRITE: {
-            // do nothing
+            ReleaseWorkRequestContext(context, endpoint);
           } break;
           case IBV_WC_RECV_RDMA_WITH_IMM: {
             uint32_t addr_idx = wc[i].imm_data;
