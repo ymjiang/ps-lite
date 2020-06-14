@@ -127,11 +127,11 @@ void Van::ProcessAddNodeCommandAtScheduler(Message *msg, Meta *nodes, Meta *reco
         }
       }
     } else if (sparse_mode) {
-      PS_VLOG(1) << "Assign the rank as the same order in BYTEPS_SPARSE_HOSTS";
-      CHECK(getenv("BYTEPS_SPARSE_HOSTS")) 
+      PS_VLOG(1) << "Assign the rank as the same order in BYTEPS_ORDERED_HOSTS";
+      CHECK(getenv("BYTEPS_ORDERED_HOSTS")) 
           << "\n should set it as a list of IP:port (port is optional) concatenated by comma " 
-          << "\n an example: BYTEPS_SPARSE_HOSTS=10.0.0.1:1234,10.0.0.2:4321";
-      std::string sparse_hosts = std::string(getenv("BYTEPS_SPARSE_HOSTS"));
+          << "\n an example: BYTEPS_ORDERED_HOSTS=10.0.0.1:1234,10.0.0.2:4321";
+      std::string sparse_hosts = std::string(getenv("BYTEPS_ORDERED_HOSTS"));
       std::vector<std::string> hosts_list;
       
       size_t pos = 0;
@@ -145,11 +145,11 @@ void Van::ProcessAddNodeCommandAtScheduler(Message *msg, Meta *nodes, Meta *reco
       std::unordered_map<std::string, size_t> ip_pos;
       for (size_t i = 0; i < hosts_list.size(); ++i) {
         std::string ip = hosts_list[i].substr(0, hosts_list[i].find(":"));
-        CHECK_EQ(ip_pos.find(ip), ip_pos.end()) << "\nDuplicate IP found in BYTEPS_SPARSE_HOSTS: " << ip; 
+        CHECK_EQ(ip_pos.find(ip), ip_pos.end()) << "\nDuplicate IP found in BYTEPS_ORDERED_HOSTS: " << ip; 
         ip_pos[ip] = i;
       }
 
-      // sort the ip in the same order as BYTEPS_SPARSE_HOSTS
+      // sort the ip in the same order as BYTEPS_ORDERED_HOSTS
       std::sort(nodes->control.node.begin(), nodes->control.node.end(),
                 [&ip_pos](const Node &a, const Node &b) {
                   return ip_pos[a.hostname] < ip_pos[b.hostname];
