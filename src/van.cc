@@ -97,9 +97,9 @@ void Van::ProcessAddNodeCommandAtScheduler(Message *msg, Meta *nodes, Meta *reco
         getenv("BYTEPS_ENABLE_MIXED_MODE") 
         ? atoi(getenv("BYTEPS_ENABLE_MIXED_MODE")) 
         : false;
-    bool sparse_mode = getenv("BYTEPS_SPARSE_HOSTS") ? true : false;
+    bool sparse_mode = getenv("BYTEPS_ORDERED_HOSTS") ? true : false;
     CHECK_NE(mixed_mode && sparse_mode, true) 
-      << "BYTEPS_ENABLE_MIXED_MODE and BYTEPS_SPARSE_HOSTS should not coexist";
+      << "BYTEPS_ENABLE_MIXED_MODE and BYTEPS_ORDERED_HOSTS should not coexist";
 
     if (mixed_mode) {
       std::unordered_map<std::string, size_t> ip_cnt;
