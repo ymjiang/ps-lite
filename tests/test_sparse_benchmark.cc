@@ -38,70 +38,65 @@ void float_sum(float *dst, float *src, size_t len) {
     dst[i] = dst[i] + src[i];
   }
 }
+uint64_t DecodeKey(ps::Key key) {
+  auto kr = ps::Postoffice::Get()->GetServerKeyRanges()[ps::MyRank()];
+  return key - kr.begin();
+}
 
+void MallocAligned(void** ptr, size_t size) {
+  size_t page_size = sysconf(_SC_PAGESIZE);
+  void* p;
+  int size_aligned = ROUNDUP(size, page_size);
+  int ret = posix_memalign(&p, page_size, size_aligned);
+  CHECK_EQ(ret, 0) 
+      << "posix_memalign error: " << strerror(ret);
+  CHECK(p);
+  memset(p, 0, size);
+  *ptr = p;
+}
+
+template <typename T>
+void AllocMemoryAndCreateSarray(ps::SArray<T>& sarr, T* addr, int count) {
+  void* ptr;
+  MallocAligned(&ptr, count * sizeof(T));
+  memcpy(ptr, (void*)addr, count * sizeof(T));
+  sarr.reset((T*)ptr, count, [](void *){});
+}
+
+static std::unordered_map<uint64_t, KVPairs<char>> _init_bufferLengths;
 template <typename Val>
-void EmptyHandler(const KVMeta &req_meta, const KVPairs<Val> &req_data, KVServer<Val> *server) {
+void EmptyHandler(const ps::KVMeta &req_meta, 
+                         const ps::KVPairs<Val> &req_data, 
+                         ps::KVServer<Val> *server) {
   uint64_t key = req_data.keys[0];
   if (req_meta.push) {
     CHECK(req_data.lens.size());
     CHECK_EQ(req_data.vals.size(), (size_t)req_data.lens[0]) 
-        << "key=" << key << ", " << req_data.vals.size() << ", " << req_data.lens[0];
-
-    if (mem_map_push.find(key) == mem_map_push.end()) {
-      size_t len = (size_t) req_data.vals.size();
-
-      void* ptr_val;
-      aligned_memory_alloc(&ptr_val, len);  
-      mem_map_push[key].vals.reset((char*)ptr_val, len, [](void *){ });
-
-      void* ptr_key;
-      aligned_memory_alloc(&ptr_key, sizeof(Key));  
-      mem_map_push[key].keys.reset((Key*)ptr_key, 1, [](void *){ });
-      memcpy(ptr_key, &key, sizeof(Key));
-
-      void* ptr_len;
-      aligned_memory_alloc(&ptr_len, sizeof(int));  
-      mem_map_push[key].lens.reset((int*)ptr_len, 1, [](void *){ });
-      memcpy(ptr_len, &len, sizeof(int));
-    }
+        << "key=" << key << ", " 
+        << req_data.vals.size() << ", " 
+        << req_data.lens[0];
 
     auto recved = reinterpret_cast<char*>(req_data.vals.data());
-    // only sum the first 4 bytes
-    size_t sum_len = debug_mode_ ? req_data.vals.size() : 0;
-    float_sum((float*) mem_map_push[key].vals.data(), (float*) recved, sum_len);
 
-    if (debug_mode_) {
-      LOG(INFO) << "recved tensor! key=" << key << "\t"
-          << "store: " << DEBUG_PRINT_TENSOR_VALUE(mem_map_push[key].vals.data()) << "\t"
-          << "recv: " << DEBUG_PRINT_TENSOR_VALUE(recved) << "\t"
-          << "address: " << DEBUG_PRINT_TENSOR_ADDRESS(recved) << "\t"
-          << "len: " << req_data.vals.size() << "\t"
-          << "sender: " << req_meta.sender;
+    int len = (int) req_data.vals.size();
+    if (_init_bufferLengths.find(key) == _init_bufferLengths.end()) {
+      AllocMemoryAndCreateSarray(_init_bufferLengths[key].keys, (ps::Key*)&key, 1);
+      AllocMemoryAndCreateSarray(_init_bufferLengths[key].vals, recved, len);
+      AllocMemoryAndCreateSarray(_init_bufferLengths[key].lens, (int*)&len, 1);
     }
 
-    // send push response (empty)
-    KVPairs<char> res;
+    LOG(INFO) << "receive push key=" << key << "\t" 
+        << "len=" << len << "\t"
+        << ((size_t*)recved)[0] << " from sender=" << req_meta.sender << "\n";
+    
+    // send push response (empty payload)
+    ps::KVPairs<char> res;
     server->Response(req_meta, res);
   } else { // pull 
-    auto iter = mem_map_pull.find(key);
-    if (iter == mem_map_pull.end()) {
-      size_t len = (size_t) req_meta.val_len;
-      LOG(INFO) << "len=" << len;
-      void* ptr_val;
-      aligned_memory_alloc(&ptr_val, len);  
-      mem_map_pull[key].vals.reset((char*)ptr_val, len, [](void *){ });
+    LOG(INFO) << "receive pull key=" << key << " from sender=" << req_meta.sender;
+    CHECK(_init_bufferLengths.find(key) != _init_bufferLengths.end()) << key;
+    server->Response(req_meta, _init_bufferLengths[key]);
 
-      void* ptr_key;
-      aligned_memory_alloc(&ptr_key, sizeof(Key));  
-      mem_map_pull[key].keys.reset((Key*)ptr_key, 1, [](void *){ });
-      memcpy(ptr_key, &key, sizeof(Key));
-
-      void* ptr_len;
-      aligned_memory_alloc(&ptr_len, sizeof(int));  
-      mem_map_pull[key].lens.reset((int*)ptr_len, 1, [](void *){ });
-      memcpy(ptr_len, &len, sizeof(int));
-    }
-    server->Response(req_meta, mem_map_pull[key]);
   }
 }
 
@@ -114,81 +109,6 @@ void StartServer() {
   RegisterExitCallback([server]() { delete server; });
 }
 
-void push_pull(KVWorker<char> &kv, 
-               std::vector<SArray<Key> > &server_keys,
-               std::vector<SArray<char> > &server_vals, 
-               std::vector<SArray<char> > &server_vals_pull, 
-               std::vector<SArray<int> > &server_lens,
-               int len, int len_pull,
-               int num_servers, int total_key_num, 
-               int how_many_key_per_server, MODE mode) {
-  auto valid_len = len > len_pull ? len : len_pull;
-
-  CHECK_GT(mode, 0);
-  switch (mode) {
-    case PUSH_PULL: // 0
-      LOG(INFO) << "========= PUSH_PULL mode =========";
-      LOG(INFO) << "========= msg_size=" << valid_len * sizeof(char) << " bytes =========";
-      break;
-    case PUSH_ONLY: // 1
-      LOG(INFO) << "========= PUSH_ONLY mode =========";
-      LOG(INFO) << "========= msg_size=" << valid_len * sizeof(char) << " bytes =========";
-       break;
-    case PULL_ONLY: // 2
-      LOG(INFO) << "========= PULL_ONLY mode =========";
-      LOG(INFO) << "========= msg_size=" << valid_len * sizeof(char) << " bytes =========";
-      break;
-    default: CHECK(0);
-  }
-
-  std::vector<int> timestamp_list;
-  auto start = std::chrono::high_resolution_clock::now();
-  auto end = std::chrono::high_resolution_clock::now();
-  
-  auto val = Environment::Get()->find("LOG_DURATION");
-  unsigned int log_duration = val ? atoi(val) : 10;
-  
-  int cnt = 0;
-  while (1) {
-    for (int key = 0; key < total_key_num; key++) {
-      auto keys = server_keys[key];
-      auto lens = server_lens[key];
-      auto vals = server_vals[key];
-      auto vals_pull = server_vals_pull[key];
-
-      switch (mode) {
-        case PUSH_PULL: {
-          timestamp_list.push_back(kv.ZPush(keys, vals, lens));
-          timestamp_list.push_back(kv.ZPull(keys, &vals_pull, &lens));
-        } break;
-        case PUSH_ONLY: {
-          timestamp_list.push_back(kv.ZPush(keys, vals, lens));
-        } break;
-        case PULL_ONLY: {
-          timestamp_list.push_back(kv.ZPull(keys, &vals_pull, &lens));
-        } break;
-        default: {
-          CHECK(0);
-          break;
-        } 
-      }
-    }
-
-    for (auto& ts : timestamp_list) { kv.Wait(ts); }
-    timestamp_list.clear();
-    
-    cnt++;
-    if (cnt % log_duration != 0) continue;
-
-    end = std::chrono::high_resolution_clock::now();
-    LL << "Application goodput: " 
-        << 8.0 * valid_len * sizeof(char) * total_key_num * cnt / (end - start).count() 
-        << " Gbps";
-    cnt = 0;
-    start = std::chrono::high_resolution_clock::now();
-  }
-}
-
 void CreateSarrayVector(std::vector<SArray<char> > &vec, const int len, const int key_num) {
   for (int key = 0; key < key_num; key++) {
     void* ptr;
@@ -199,6 +119,8 @@ void CreateSarrayVector(std::vector<SArray<char> > &vec, const int len, const in
   }
 }
 
+using data_t = uint64_t;
+
 void RunWorker(int argc, char *argv[]) {
   if (!IsWorker()) return;
   KVWorker<char> kv(0, 0);
@@ -207,101 +129,78 @@ void RunWorker(int argc, char *argv[]) {
   const int num_servers = krs.size();
   LOG(INFO) << num_servers << " servers in total";
   CHECK_GT(num_servers, 0);
+  const int len = 8;
 
-  // init
-  int len = (argc > 1) ? atoi(argv[1]) : 1024000;
-  int len_pull = (argc > 2) ? atoi(argv[2]) : 512000;
-  int repeat = (argc > 3) ? atoi(argv[3]) : 10;
-  MODE mode = (argc > 4) ? static_cast<MODE>(atoi(argv[4])) : PUSH_THEN_PULL;
+  std::vector<ps::SArray<ps::Key>> tmpKeys;
+  std::vector<ps::SArray<int>> tmpLens;
+  std::vector<ps::SArray<char>> bufferLenSarrays;
+  auto ps = &kv;
 
-  auto v = Environment::Get()->find("NUM_KEY_PER_SERVER");
-  const int how_many_key_per_server = v ? atoi(v) : 40;
-  const int total_key_num = num_servers * how_many_key_per_server;
+  int workerID = ps::MyRank() == 0 ? 0 : 1;
+  std::vector<size_t> _globalTotalEmbedBufLens = {0, 0};
+  if (ps::MyRank() == 0) _globalTotalEmbedBufLens[0] = 100;
+  if (ps::MyRank() == 1) _globalTotalEmbedBufLens[1] = 200;
+  LOG(INFO) << "My rank is " << MyRank();
+  LOG(INFO) << "Before comm: (" << _globalTotalEmbedBufLens[0] 
+      << ", " << _globalTotalEmbedBufLens[1] << ")";
 
-  std::vector<SArray<char> > server_vals;
-  std::vector<SArray<char> > server_vals_pull;
-  std::vector<SArray<Key> > server_keys;
-  std::vector<SArray<int> > server_lens;
-  CreateSarrayVector(server_vals, len, total_key_num);
-  CreateSarrayVector(server_vals_pull, len_pull, total_key_num);
+  for (int i = 0; i < 2; i++) {
+    ps::Key key = i;
+    int server = i;
 
-  // init push, do not count this into time cost
-  for (int key = 0; key < total_key_num; key++) {
-    int server = key % num_servers;
-    PS_VLOG(1) << "key=" << key << " assigned to server " << server;
-
-    auto vals = server_vals[key];
-
-    // page aligned keys
+    // vals
+    ps::SArray<char> tmp;
+    tmp.reset((char*)&_globalTotalEmbedBufLens[i], sizeof(size_t), [](void *){});
+    bufferLenSarrays.push_back(tmp);
+    
+    // keys
+    // ps::Key ps_key = krs[0].begin() + key;
+    // ps::SArray<ps::Key> keys;
+    // keys.reset(&ps_key, 1, [](void *){});
+    // tmpKeys.push_back(keys);
     void* ptr_key;
     aligned_memory_alloc(&ptr_key, sizeof(Key));
     SArray<Key> keys;
     keys.reset((Key*) ptr_key, 1, [](void *){});
     ps::Key ps_key = krs[server].begin() + key;
     memcpy(ptr_key, &ps_key, sizeof(Key));
-    server_keys.push_back(keys);
-
-    // page aligned lens
+    tmpKeys.push_back(keys);
+    
+    // lens
+    // int ps_len = sizeof(size_t);
+    // ps::SArray<int> lens;
+    // lens.reset(&ps_len, 1, [](void *){});
+    // tmpLens.push_back(lens);
     void* ptr_len;
     aligned_memory_alloc(&ptr_len, sizeof(int));
     SArray<int> lens;
     lens.reset((int*) ptr_len, 1, [](void *){});
     memcpy(ptr_len, &len, sizeof(len));
-    server_lens.push_back(lens);
-
-    kv.Wait(kv.ZPush(keys, vals, lens));
+    tmpLens.push_back(lens);
   }
 
-  switch(mode) {
-    case PUSH_THEN_PULL: {
-      LOG(INFO) << "PUSH_THEN_PULL mode";
-      // push
-      uint64_t accumulated_ms = 0;
-      for (int i = 0; i < repeat; ++i) {
-        auto start = std::chrono::high_resolution_clock::now();
-        for (int server = 0; server < num_servers; server++) {
-          auto keys = server_keys[server];
-          auto lens = server_lens[server];
-          auto vals = server_vals[server];
-
-          kv.Wait(kv.ZPush(keys, vals, lens));
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        accumulated_ms += (end - start).count(); // ns
-      }
-      LL << "push " << len * sizeof(char)
-          << " bytes to each server, repeat=" << repeat
-          << ", total_time="
-          << accumulated_ms / 1e6 << "ms";
-
-      // pull
-      accumulated_ms = 0;
-      for (int i = 0; i < repeat; ++i) {
-        auto start = std::chrono::high_resolution_clock::now();
-        for (int server = 0; server < num_servers; server++) {
-          auto keys = server_keys[server];
-          auto lens = server_lens[server];
-          auto vals = server_vals_pull[server];
-
-          kv.Wait(kv.ZPull(keys, &vals, &lens));
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        accumulated_ms += (end - start).count(); // ns
-      }
-
-      LL << "pull " << len_pull * sizeof(char)
-          << " bytes to each server, repeat=" << repeat
-          << ", total_time="
-          << accumulated_ms / 1e6 << "ms";
-    } break;
-    case PUSH_PULL: 
-    case PUSH_ONLY: 
-    case PULL_ONLY: 
-      push_pull(kv, server_keys, server_vals, server_vals_pull, server_lens, len, len_pull, num_servers, total_key_num, how_many_key_per_server, mode);
-      break;
-    default:
-      CHECK(0) << "unknown mode " << mode;
+  // Push once to the associated server
+  {
+    int server = workerID;
+    auto keys = tmpKeys[server];
+    auto vals = bufferLenSarrays[server];
+    auto lens = tmpLens[server];
+    ps->Wait(ps->ZPush(keys, vals, lens));
   }
+  std::this_thread::sleep_for(std::chrono::seconds(5));
+
+  // Pull the embedding buffer length of other workers
+  {
+    int server = workerID == 0 ? 1 : 0;
+    // int server = workerID;
+    auto keys = tmpKeys[server];
+    auto vals = bufferLenSarrays[server];
+    auto lens = tmpLens[server];
+    ps->Wait(ps->ZPull(keys, &vals, &lens));
+  }
+
+  LOG(INFO) << "After comm: (" << _globalTotalEmbedBufLens[0] 
+      << ", " << _globalTotalEmbedBufLens[1] << ")";
 }
 
 int main(int argc, char *argv[]) {
