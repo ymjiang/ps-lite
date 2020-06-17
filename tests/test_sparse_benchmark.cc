@@ -68,7 +68,7 @@ template <typename Val>
 void EmptyHandler(const ps::KVMeta &req_meta, 
                          const ps::KVPairs<Val> &req_data, 
                          ps::KVServer<Val> *server) {
-  uint64_t key = req_data.keys[0];
+  uint64_t key = DecodeKey(req_data.keys[0]);
   if (req_meta.push) {
     CHECK(req_data.lens.size());
     CHECK_EQ(req_data.vals.size(), (size_t)req_data.lens[0]) 
@@ -80,7 +80,7 @@ void EmptyHandler(const ps::KVMeta &req_meta,
 
     int len = (int) req_data.vals.size();
     if (_init_bufferLengths.find(key) == _init_bufferLengths.end()) {
-      AllocMemoryAndCreateSarray(_init_bufferLengths[key].keys, (ps::Key*)&key, 1);
+      AllocMemoryAndCreateSarray(_init_bufferLengths[key].keys, (ps::Key*)&req_data.keys[0], 1);
       AllocMemoryAndCreateSarray(_init_bufferLengths[key].vals, recved, len);
       AllocMemoryAndCreateSarray(_init_bufferLengths[key].lens, (int*)&len, 1);
     }
@@ -154,28 +154,20 @@ void RunWorker(int argc, char *argv[]) {
     bufferLenSarrays.push_back(tmp);
     
     // keys
-    // ps::Key ps_key = krs[0].begin() + key;
-    // ps::SArray<ps::Key> keys;
-    // keys.reset(&ps_key, 1, [](void *){});
-    // tmpKeys.push_back(keys);
+    ps::Key ps_key = krs[server].begin() + key;
     void* ptr_key;
     aligned_memory_alloc(&ptr_key, sizeof(Key));
-    SArray<Key> keys;
-    keys.reset((Key*) ptr_key, 1, [](void *){});
-    ps::Key ps_key = krs[server].begin() + key;
     memcpy(ptr_key, &ps_key, sizeof(Key));
+    SArray<Key> keys;
+    keys.reset((Key*) ptr_key, 1, [ptr_key](void *){ free(ptr_key); });
     tmpKeys.push_back(keys);
     
     // lens
-    // int ps_len = sizeof(size_t);
-    // ps::SArray<int> lens;
-    // lens.reset(&ps_len, 1, [](void *){});
-    // tmpLens.push_back(lens);
     void* ptr_len;
     aligned_memory_alloc(&ptr_len, sizeof(int));
-    SArray<int> lens;
-    lens.reset((int*) ptr_len, 1, [](void *){});
     memcpy(ptr_len, &len, sizeof(len));
+    SArray<int> lens;
+    lens.reset((int*) ptr_len, 1, [ptr_len](void *){ free(ptr_len); });
     tmpLens.push_back(lens);
   }
 
@@ -187,7 +179,9 @@ void RunWorker(int argc, char *argv[]) {
     auto lens = tmpLens[server];
     ps->Wait(ps->ZPush(keys, vals, lens));
   }
-  std::this_thread::sleep_for(std::chrono::seconds(5));
+
+  ps::Postoffice::Get()->Barrier(
+      0, ps::kWorkerGroup + ps::kServerGroup + ps::kScheduler);
 
   // Pull the embedding buffer length of other workers
   {
@@ -212,6 +206,11 @@ int main(int argc, char *argv[]) {
   StartServer();
   // run worker nodes
   RunWorker(argc, argv);
+  if (!IsWorker()) {
+    // A barrier to sync the global buffer
+    ps::Postoffice::Get()->Barrier(
+        0, ps::kWorkerGroup + ps::kServerGroup + ps::kScheduler);
+  }
   // stop system
   Finalize(0, true);
   return 0;
