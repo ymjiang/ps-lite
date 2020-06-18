@@ -129,7 +129,6 @@ void RunWorker(int argc, char *argv[]) {
   const int num_servers = krs.size();
   LOG(INFO) << num_servers << " servers in total";
   CHECK_GT(num_servers, 0);
-  const int len = 8;
 
   std::vector<ps::SArray<ps::Key>> tmpKeys;
   std::vector<ps::SArray<int>> tmpLens;
@@ -137,12 +136,23 @@ void RunWorker(int argc, char *argv[]) {
   auto ps = &kv;
 
   int workerID = ps::MyRank() == 0 ? 0 : 1;
-  std::vector<size_t> _globalTotalEmbedBufLens = {0, 0};
-  if (ps::MyRank() == 0) _globalTotalEmbedBufLens[0] = 100;
-  if (ps::MyRank() == 1) _globalTotalEmbedBufLens[1] = 200;
+  int num_element_per_dim = 2;
+  std::vector<std::vector<size_t>> 
+      _globalTotalEmbedBufLens(num_element_per_dim, std::vector<size_t>(num_element_per_dim));
+  const int len = num_element_per_dim * sizeof(size_t);
+  if (ps::MyRank() == 0) {
+    _globalTotalEmbedBufLens[0][0] = 50;
+    _globalTotalEmbedBufLens[0][1] = 100;
+  } else {
+    _globalTotalEmbedBufLens[1][0] = 200;
+    _globalTotalEmbedBufLens[1][1] = 250;
+  }
   LOG(INFO) << "My rank is " << MyRank();
-  LOG(INFO) << "Before comm: (" << _globalTotalEmbedBufLens[0] 
-      << ", " << _globalTotalEmbedBufLens[1] << ")";
+  LOG(INFO) << "Before comm: (" 
+      << _globalTotalEmbedBufLens[0][0] << ", " 
+      << _globalTotalEmbedBufLens[0][1] << "), ("
+      << _globalTotalEmbedBufLens[1][0] << ", " 
+      << _globalTotalEmbedBufLens[1][1] << ")";
 
   for (int i = 0; i < 2; i++) {
     ps::Key key = i;
@@ -150,7 +160,7 @@ void RunWorker(int argc, char *argv[]) {
 
     // vals
     ps::SArray<char> tmp;
-    tmp.reset((char*)&_globalTotalEmbedBufLens[i], sizeof(size_t), [](void *){});
+    tmp.reset((char*)_globalTotalEmbedBufLens[i].data(), num_element_per_dim * sizeof(size_t), [](void *){});
     bufferLenSarrays.push_back(tmp);
     
     // keys
@@ -184,8 +194,9 @@ void RunWorker(int argc, char *argv[]) {
       0, ps::kWorkerGroup + ps::kServerGroup + ps::kScheduler);
 
   // Pull the embedding buffer length of other workers
-  {
-    int server = workerID == 0 ? 1 : 0;
+  for (int i = 0; i < 2; i++) {
+    if (i == ps::MyRank()) continue;
+    int server = i;
     // int server = workerID;
     auto keys = tmpKeys[server];
     auto vals = bufferLenSarrays[server];
@@ -193,8 +204,11 @@ void RunWorker(int argc, char *argv[]) {
     ps->Wait(ps->ZPull(keys, &vals, &lens));
   }
 
-  LOG(INFO) << "After comm: (" << _globalTotalEmbedBufLens[0] 
-      << ", " << _globalTotalEmbedBufLens[1] << ")";
+  LOG(INFO) << "After comm: ("
+      << _globalTotalEmbedBufLens[0][0] << ", " 
+      << _globalTotalEmbedBufLens[0][1] << "), ("
+      << _globalTotalEmbedBufLens[1][0] << ", " 
+      << _globalTotalEmbedBufLens[1][1] << ")";
 }
 
 int main(int argc, char *argv[]) {
